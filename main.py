@@ -14,142 +14,119 @@ import glob as glob
 #import matplotlib.pyplot as plt
 import plotly.express as px
 
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, accuracy_score
 from sklearn.pipeline import make_pipeline
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
 from category_encoders import OneHotEncoder
 from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 
 import streamlit as st
 
 def wrangle(file):
-    df = pd.read_csv(file)  #read the csv file
-    
-    mask_place = df["place_with_parent_names"].str.contains("Capital Federal")  # *turn place into a variable
-    mask_property_type = df["property_type"] == "house"  # * turn prop type to a variable
-    mask_price = df["price_approx_usd"] < 400000  # * turn to price to a variable
-    low, high = df["surface_area_covered_in_m2"].quantile([0.1,0.9])
-    mask_area = df["surface_area_covered_in_m2"].between(low, high)
-    df = df[mask_place & mask_price & mask_property_type & mask_area]
-    
-    df["lat","lon"] = df["lat-lon"].str.split(",", expand=True).astype(float)  #split lat and lon columns
-    
-    #dropping columns   
-    df.drop(columns=[
-        #leaky columns
-        "price",
-        "price_approx_local_currency",
-        "price_per_m2",
-        "price_usd_per_m2",
-        #unnecessary columns- has too much empty cells
-        "lat-lon",
-        "place_with_parent_names",
-        "floor",
-        "expenses",
-        #columns with high and low cardinality
-        "operation",
-        "property_type",
-        "currency",
-        "properati_url",
-        #columns with multicolinearity
-        "rooms",
-        "surface_total_in_m2"
-        ], inplace=True)
+    if file.name.endswith(".csv"):
+        df = pd.read_csv(file)
+    elif file.name.endswith(".xlsx"):
+        df = pd.read_excel(file)
+    else :
+        raise ValueError("Unsupported file type, please submit a .csv or .xlsx (excel) file")
     
     return df
 
 
-def load_and_combine_data(file):
-    if not file:
-        return "invalid  format or nor data was uploaded"
-    if file == 1:
-        df = wrangle(file[0])
-    elif len(file) > 1 and file is not None:
-        #files = glob("data/buenos-aires-real-estate-*.csv")  # * find a way to make this less hardcoded
-        frames = [wrangle(fil) for fil in file]
-        df = pd.concat(frames, ignore_index=True)
+def  listify_columns(df):
+    column_list = list(df.columns) 
     
-        
+    return column_list
 
-    return df
 
-def model_params_splitter(df):
-    target = "price_approx_usd"  # * turn this to a variable
-    y = int(len(df) * 0.7)
-    print(type(y))
-    y_train = df[target].iloc[:y]
-    features = ["surface_covered_in_m2", "lat", "lon", "neigborhood"]
-    X_train = df[features].iloc[:y]
+def det_task_type(df,target_column):
+    column_type = df[target_column].dtype
+    unique_entries = df[target_column].nunique()
     
-    y_test = df[target].iloc[y:]
-    X_test = df[features].iloc[y:]
+    if column_type == object() or bool() or unique_entries < 10:
+        task_type = "Classification"
+    else:
+        task_type = "Regression"
+   
+    return task_type
+
+
+def get_model(task_type, numerical_cols, categorical_cols):
+    if task_type == "Regression":
+        model = Ridge()
+    else:
+        model = LogisticRegression(max_iter=1000)
     
-    return {
-        "y_train": y_train,
-        "X_train": X_train,
-        "y_test": y_test,
-        "X_test": X_test
-        }
+    transformers = []
+    if categorical_cols:
+        transformers.append(("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols))
+    if numerical_cols:
+        transformers.append(("num", SimpleImputer(), numerical_cols))
 
-
-def baseline(train):
-    train_mean = train.mean()
-    pred_baseline = [train_mean] * len(train)
-    baseline_mae = mean_absolute_error(train, pred_baseline)
-    return {
-        "mean": train_mean,
-        "pred_baseline": pred_baseline, 
-        "baseline_mae": baseline_mae
-        }
-
-
-def modeller(x_train, y_train):
-    model = make_pipeline(
-        OneHotEncoder(),
-        SimpleImputer(),
-        Ridge()
+    
+    preprocessor = ColumnTransformer(
+        transformers= transformers
         )
     
-    return model.fit(x_train, y_train)
-
-
-def tester(model, test_training_data, y_test_data):
-    test_predictions = model.predict(test_training_data)
-    test_efficiency = mean_absolute_error(y_test_data, test_predictions)
+    pipeline = make_pipeline(
+        preprocessor, model
+        )
     
-    
-    return {
-        "test_predictions": test_predictions,
-        "test_efficiency": test_efficiency
-        }
-
+    return pipeline
 
 def main():
     st.title("Price predictor for real-estate data")
     
     uploaded_file = st.file_uploader("add a file or folder here here", accept_multiple_files=True)
-    df = load_and_combine_data(uploaded_file)
+    dfs = [wrangle(file) for file in uploaded_file]
+    df = pd.concat(dfs, ignore_index=True)
+
+    column_list = listify_columns(df)
+    st.write(column_list)
     
-    if isinstance(df, str):
-        st.error(df)  # show the error message
-        return
-    elif df is None:
-        st.warning("No data uploaded yet.")
-        return
+    with st.form("model form - #coming up with names is a thing?"):
+        st.write("choose columns for modelling")
+        target_column = st.selectbox("select target column", column_list)
+        feature_columns = st.multiselect("select feature columns", column_list) 
+        
+        submitted = st.form_submit_button("submit")
+        
+    if submitted:
+        if not target_column or not feature_columns:
+            st.warning("pick an target and your features")
+            return #why not use break and continue
+        
+        X_train, X_test, y_train, y_test = train_test_split(df[feature_columns], df[target_column], test_size = 0.3, random_state = 42)
+        task_type = det_task_type(df, target_column)
+        st.markdown(f"this is {task_type} task")
     
-    splits = model_params_splitter(df)
-    
-    st.subheader("Baseline performance with training data")
-    training_baseline_data = baseline(splits["y_train"])
-    st.metric("training data's mean absolute error", training_baseline_data["baseline_mae"])
-    #fig = px.scatter(df, )
-    
-    st.subheader("Model performance")
-    modelled = modeller(splits["X_train"], splits["y_train"])
-    model_efficiency = tester(modelled, splits["X_test"], splits["y_test"])
-    test_baseline = baseline(splits["y_test"])
-    st.metric("baseline of model test data", test_baseline["baseline_mae"])
-    st.metric("models MAE", model_efficiency["test_efficiency"])
-    
+        categorical_cols = X_train.select_dtypes(include="object").columns.tolist()
+        numerical_cols = X_train.select_dtypes(include="number").columns.tolist()
+        model = get_model(task_type, numerical_cols, categorical_cols)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        
+        if task_type == "Regression":
+            acc = mean_absolute_error(y_test, y_pred)
+            st.metric("mean Absolute Error: ", round(acc, 2))
+            
+            viz_df = pd.DataFrame({"Actual":y_test, "Predicted": y_pred})
+            fig = px.scatter(viz_df, x="Actual", y="Predicted",
+                             title="Actual vs Predicted",
+                             labels={"x": "Actual values", "y":"Predicted values"})
+            st.plotly_chart(fig)
+            
+        else:
+            acc = accuracy_score(y_test, y_pred)
+            st.metric("Accuracy", f"{round(acc * 100,2)}%")
+            
+            viz_df = pd.DataFrame({"Actual": y_test, "Predicted": y_pred})
+            fig = px.histogram(viz_df, x="Actual", color="Predicted", barmode="group",
+                               title="Actual vs Predicted Class Distribution")
+            st.plotly_chart(fig)
+
 
 main()
